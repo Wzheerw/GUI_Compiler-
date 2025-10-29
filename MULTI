@@ -1,0 +1,290 @@
+// lib/scheduler.ts
+export function computeMetrics(state: SchedulerSnapshot) {
+  const activeTicks = state.timeline.filter((t) => t.pid).length
+  const cpuUtil = state.time > 0 ? (activeTicks / state.time) * 100 : 0
+
+  const finished = state.processes.filter((p) => p.state === "finished")
+  const records: ProcessRecord[] = finished.map((p) => {
+    const tat = (p.endTime ?? state.time) - p.arrival
+    const wt = tat - p.burst
+    return {
+      id: p.id,
+      name: p.name,
+      arrival: p.arrival,
+      burst: p.burst,
+      priority: p.priority,
+      type: p.type,
+      startTime: p.startTime,
+      endTime: p.endTime,
+      waitingTime: wt,
+      turnaroundTime: tat,
+      weightedTurnaround: p.burst ? tat / p.burst : 0,
+      finishedBy: p.finishedBy,
+    }
+  })
+
+  const groupByAlgo = (algo: AlgoKey) => records.filter((r) => r.finishedBy === algo)
+  const avg = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0)
+  const sum = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) : 0)
+
+  const byAlgo = {
+    RR: {
+      rows: groupByAlgo("RR"),
+      avgWaiting: avg(groupByAlgo("RR").map((r) => r.waitingTime ?? 0)),
+      avgTurnaround: avg(groupByAlgo("RR").map((r) => r.turnaroundTime ?? 0)),
+      avgWeighted: avg(groupByAlgo("RR").map((r) => r.weightedTurnaround ?? 0)),
+    },
+    Priority: {
+      rows: groupByAlgo("Priority"),
+      avgWaiting: avg(groupByAlgo("Priority").map((r) => r.waitingTime ?? 0)),
+      avgTurnaround: avg(groupByAlgo("Priority").map((r) => r.turnaroundTime ?? 0)),
+      avgWeighted: avg(groupByAlgo("Priority").map((r) => r.weightedTurnaround ?? 0)),
+    },
+    FCFS: {
+      rows: groupByAlgo("FCFS"),
+      avgWaiting: avg(groupByAlgo("FCFS").map((r) => r.waitingTime ?? 0)),
+      avgTurnaround: avg(groupByAlgo("FCFS").map((r) => r.turnaroundTime ?? 0)),
+      avgWeighted: avg(groupByAlgo("FCFS").map((r) => r.weightedTurnaround ?? 0)),
+    },
+  }
+
+  const overall = {
+    avgWaiting: avg(records.map((r) => r.waitingTime ?? 0)),
+    avgTurnaround: avg(records.map((r) => r.turnaroundTime ?? 0)),
+    avgWeighted: avg(records.map((r) => r.weightedTurnaround ?? 0)),
+    finished: records.length,
+    total: state.processes.length,
+  }
+
+  const totals = {
+    waiting: sum(records.map((r) => r.waitingTime ?? 0)),
+    turnaround: sum(records.map((r) => r.turnaroundTime ?? 0)),
+  }
+
+  return {
+    cpuUtil,
+    byAlgo,
+    overall,
+    totals,
+  }
+}
+
+// components/gantt-chart.tsx
+"use client"
+
+import type { SchedulerSnapshot } from "@/lib/scheduler"
+import { useMemo } from "react"
+
+export default function GanttChart({
+  snapshot,
+  completed = false,
+}: {
+  snapshot: SchedulerSnapshot
+  completed?: boolean
+}) {
+  const procs = snapshot.processes.slice().sort((a, b) => Number(a.id) - Number(b.id))
+  const maxTime = Math.max(snapshot.time, snapshot.timeline.length)
+  const colorsByQueue = {
+    0: "bg-teal-500",
+    1: "bg-amber-500",
+    2: "bg-slate-500",
+  } as const
+  const laneMap = useMemo(() => {
+    const map: Record<string, { t: number; q: number }[]> = {}
+    for (const p of procs) map[p.id] = p.history
+    return map
+  }, [procs])
+  const unitW = 16
+
+  return (
+    <div className="w-full overflow-x-auto">
+      <div className="relative inline-block min-w-full rounded-md border">
+        <div className="flex bg-muted/50 text-sm text-muted-foreground">
+          <div className="w-24 shrink-0 px-2 py-2">Process</div>
+          <div className="flex-1 px-2 py-2">Timeline (0..{maxTime})</div>
+        </div>
+        <div>
+          {procs.length === 0 && (
+            <div className="px-3 py-4 text-sm text-muted-foreground">No processes yet.</div>
+          )}
+          {procs.map((p) => (
+            <div key={p.id} className="flex items-stretch border-t">
+              <div className="w-24 shrink-0 px-2 py-2 text-sm">{p.name}</div>
+              <div className="relative flex-1">
+                <div className="relative h-10">
+                  <div className="absolute inset-0 flex">
+                    {Array.from({ length: maxTime }).map((_, i) => (
+                      <div key={i} className="h-full border-r last:border-0" style={{ width: unitW }} />
+                    ))}
+                  </div>
+                  {laneMap[p.id].map((h, idx) => {
+                    const left = h.t * unitW
+                    return (
+                      <div
+                        key={idx}
+                        className={`absolute top-1 h-6 rounded ${colorsByQueue[h.q as 0 | 1 | 2]}`}
+                        style={{ left, width: unitW - 2 }}
+                        title={`t=${h.t} Q${h.q}`}
+                      />
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          ))}
+          <div className="flex items-stretch border-t">
+            <div className="w-24 shrink-0 px-2 py-2 text-sm">Idle</div>
+            <div className="relative flex-1">
+              <div className="relative h-6">
+                <div className="absolute inset-0 flex">
+                  {Array.from({ length: maxTime }).map((_, i) => (
+                    <div key={i} className="h-full border-r last:border-0" style={{ width: unitW }} />
+                  ))}
+                </div>
+                {snapshot.timeline
+                  .filter((t) => !t.pid)
+                  .map((t, idx) => (
+                    <div
+                      key={idx}
+                      className="absolute top-0 h-6 w-[14px] rounded bg-neutral-300"
+                      style={{ left: (t.t ?? 0) * unitW }}
+                    />
+                  ))}
+              </div>
+            </div>
+          </div>
+          <div className="border-t bg-muted/50 px-2 py-1 text-xs text-muted-foreground">
+            Legend: Q0 Round Robin (teal) • Q1 Priority (amber) • Q2 FCFS (slate)
+          </div>
+
+          {completed && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/60 backdrop-blur-sm">
+              <div className="rounded-md border bg-white px-3 py-1 text-sm font-medium shadow-sm">
+                Simulation complete — queues empty
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// app/page.tsx
+import { useEffect, useMemo, useState, useRef } from "react";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import GanttChart from "@/components/gantt-chart";
+import { computeMetrics } from "@/lib/scheduler";
+import type { SchedulerSnapshot } from "@/lib/scheduler";
+import { Activity } from 'lucide-react';
+
+export default function Page() {
+  const [state, setState] = useState<SchedulerSnapshot>({
+    processes: [],
+    timeline: [],
+    time: 0,
+    q0: [],
+    q1: [],
+    q2: [],
+    current: null,
+    finishedOrder: [],
+  });
+  const [autoPlay, setAutoPlay] = useState(false);
+  const timerRef = useRef<number | null>(null);
+
+  const metrics = useMemo(() => computeMetrics(state), [state]);
+
+  const queuesEmpty =
+    state.q0.length === 0 &&
+    state.q1.length === 0 &&
+    state.q2.length === 0 &&
+    !state.current
+
+  const completed = queuesEmpty || (state.finishedOrder.length === state.processes.length && state.processes.length > 0)
+
+  useEffect(() => {
+    if (completed && autoPlay) {
+      setAutoPlay(false);
+    }
+  }, [completed, autoPlay]);
+
+  useEffect(() => {
+    if (completed) {
+      setAutoPlay(false)
+      if (timerRef.current) {
+        window.clearInterval(timerRef.current)
+        timerRef.current = null
+      }
+    }
+  }, [completed])
+
+  return (
+    <div className="flex flex-col gap-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Activity className="h-5 w-5" />
+            Gantt Chart
+          </CardTitle>
+          <CardDescription>
+            Per-unit timeline; colors denote queue level: Q0 teal, Q1 amber, Q2 slate.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <GanttChart snapshot={state} completed={completed} />
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>MLFQ Summary (Totals)</CardTitle>
+          <CardDescription>Totals across all finished processes; includes average weighted turnaround</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="rounded-md border p-3">
+              <div className="text-xs text-muted-foreground">Total Waiting Time</div>
+              <div className="text-xl font-semibold">{metrics.totals.waiting.toFixed(0)}</div>
+            </div>
+            <div className="rounded-md border p-3">
+              <div className="text-xs text-muted-foreground">Total Turnaround Time</div>
+              <div className="text-xl font-semibold">{metrics.totals.turnaround.toFixed(0)}</div>
+            </div>
+            <div className="rounded-md border p-3">
+              <div className="text-xs text-muted-foreground">Average Weighted Turnaround</div>
+              <div className="text-xl font-semibold">{metrics.overall.avgWeighted.toFixed(2)}</div>
+            </div>
+          </div>
+          <div className="mt-3 text-xs text-muted-foreground">
+            Finished {metrics.overall.finished} of {metrics.overall.total} processes
+          </div>
+        </CardContent>
+      </Card>
+
+      {completed && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Summary</CardTitle>
+            <CardDescription>Overall averages across all finished processes</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Average Waiting Time</div>
+                <div className="text-xl font-semibold">{metrics.overall.avgWaiting.toFixed(2)}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Average Turnaround Time</div>
+                <div className="text-xl font-semibold">{metrics.overall.avgTurnaround.toFixed(2)}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">CPU Utilization</div>
+                <div className="text-xl font-semibold">{metrics.cpuUtil.toFixed(2)}%</div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+      {/* rest of code here */}
+    </div>
+  );
+}

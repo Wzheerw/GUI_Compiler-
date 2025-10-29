@@ -1,0 +1,183 @@
+// lib/scheduler.ts
+export function computeMetrics(state: SchedulerSnapshot) {
+  const activeTicks = state.timeline.filter((t) => t.pid).length;
+  const cpuUtil = state.time > 0 ? (activeTicks / state.time) * 100 : 0;
+
+  const finished = state.processes.filter((p) => p.state === "finished");
+  const records: ProcessRecord[] = finished.map((p) => {
+    const tat = p.endTime! - p.arrival;
+    const wt = tat - p.burst;
+    return {
+      id: p.id,
+      name: p.name,
+      arrival: p.arrival,
+      burst: p.burst,
+      priority: p.priority,
+      type: p.type,
+      startTime: p.startTime,
+      endTime: p.endTime,
+      waitingTime: wt,
+      turnaroundTime: tat,
+      weightedTurnaround: tat / p.burst,
+      finishedBy: p.finishedBy,
+    };
+  });
+
+  const groupByAlgo = (algo: AlgoKey) => records.filter((r) => r.finishedBy === algo);
+  const avg = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+
+  const byAlgo = {
+    RR: {
+      rows: groupByAlgo("RR"),
+      avgWaiting: avg(groupByAlgo("RR").map((r) => r.waitingTime ?? 0)),
+      avgTurnaround: avg(groupByAlgo("RR").map((r) => r.turnaroundTime ?? 0)),
+      avgWeighted: avg(groupByAlgo("RR").map((r) => r.weightedTurnaround ?? 0)),
+    },
+    Priority: {
+      rows: groupByAlgo("Priority"),
+      avgWaiting: avg(groupByAlgo("Priority").map((r) => r.waitingTime ?? 0)),
+      avgTurnaround: avg(groupByAlgo("Priority").map((r) => r.turnaroundTime ?? 0)),
+      avgWeighted: avg(groupByAlgo("Priority").map((r) => r.weightedTurnaround ?? 0)),
+    },
+    FCFS: {
+      rows: groupByAlgo("FCFS"),
+      avgWaiting: avg(groupByAlgo("FCFS").map((r) => r.waitingTime ?? 0)),
+      avgTurnaround: avg(groupByAlgo("FCFS").map((r) => r.turnaroundTime ?? 0)),
+      avgWeighted: avg(groupByAlgo("FCFS").map((r) => r.weightedTurnaround ?? 0)),
+    },
+  };
+
+  const overall = {
+    avgWaiting: avg(records.map((r) => r.waitingTime ?? 0)),
+    avgTurnaround: avg(records.map((r) => r.turnaroundTime ?? 0)),
+    avgWeighted: avg(records.map((r) => r.weightedTurnaround ?? 0)),
+    finished: records.length,
+    total: state.processes.length,
+  };
+
+  return {
+    cpuUtil,
+    byAlgo,
+    overall,
+  };
+}
+
+// components/gantt-chart.tsx
+export default function GanttChart({ snapshot, completed = false }: { snapshot: SchedulerSnapshot; completed?: boolean }) {
+  return (
+    <div className="relative inline-block min-w-full rounded-md border">
+      {/* Gantt Chart rendering code here */}
+      {completed && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/60 backdrop-blur-sm">
+          <div className="rounded-md border bg-white px-3 py-1 text-sm font-medium shadow-sm">
+            Simulation completed
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// app/page.tsx
+import { useEffect } from "react";
+import GanttChart from "@/components/gantt-chart";
+import Card from "@/components/ui/card";
+import CardHeader from "@/components/ui/card-header";
+import CardTitle from "@/components/ui/card-title";
+import CardDescription from "@/components/ui/card-description";
+import CardContent from "@/components/ui/card-content";
+import WaitForGraph from "@/components/wait-for-graph";
+import { cn } from "@/utils/cn";
+
+export default function Page() {
+  const [state, setState] = useState<SchedulerSnapshot>({ timeline: [], processes: [], time: 0, deadlock: { cycle: [] } });
+  const [autoPlay, setAutoPlay] = useState(false);
+  const simDone = state.processes.every((p) => p.state === "finished");
+  const metrics = computeMetrics(state);
+
+  useEffect(() => {
+    if (simDone) {
+      setAutoPlay(false);
+    }
+  }, [simDone]);
+
+  return (
+    <div className="p-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>Gantt Chart</CardTitle>
+          <CardDescription>Visualization of process scheduling</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <GanttChart snapshot={state} completed={simDone} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Summary</CardTitle>
+          <CardDescription>Overall averages across all processes</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="rounded-md border p-3">
+              <div className="text-xs text-muted-foreground">Avg Waiting Time</div>
+              <div className="text-xl font-semibold">
+                {metrics.overall.avgWaiting.toFixed(2)}
+              </div>
+            </div>
+            <div className="rounded-md border p-3">
+              <div className="text-xs text-muted-foreground">Avg Turnaround Time</div>
+              <div className="text-xl font-semibold">
+                {metrics.overall.avgTurnaround.toFixed(2)}
+              </div>
+            </div>
+            <div className="rounded-md border p-3">
+              <div className="text-xs text-muted-foreground">CPU Utilization</div>
+              <div className="text-xl font-semibold">
+                {metrics.cpuUtil.toFixed(2)}%
+              </div>
+            </div>
+          </div>
+          <div className="mt-3 text-xs text-muted-foreground">
+            Finished {metrics.overall.finished} of {metrics.overall.total} processes
+          </div>
+        </CardContent>
+      </Card>
+
+      <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>Resources & Deadlock</CardTitle>
+            <CardDescription>Understanding resource allocation and deadlock</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className={cn("rounded-md border p-2", hasDeadlock ? "border-destructive" : "")}>
+              <WaitForGraph />
+            </div>
+            <div className="mt-3 space-y-2 rounded-md bg-muted/40 p-3 text-xs leading-relaxed">
+              <div className="font-medium">How to read the Wait-For Graph</div>
+              <ul className="list-inside list-disc">
+                <li>Each node is a process (e.g., P1, P2).</li>
+                <li>An arrow from Pi to Pj means Pi is waiting for a resource currently owned by Pj.</li>
+                <li>A cycle (highlighted in red) means deadlock.</li>
+              </ul>
+              <div className="font-medium">How deadlock is resolved here</div>
+              <ul className="list-inside list-disc">
+                <li>We pick a victim process to terminate: lowest priority wins; ties break by latest arrival.</li>
+                <li>Terminating the victim releases its resources and unblocks others.</li>
+              </ul>
+              <div className="text-[0.8rem]">
+                Status: {hasDeadlock
+                  ? `Deadlock among ${state.deadlock.cycle.map((id) => `P${id}`).join(", ")}`
+                  : "No deadlock detected"}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Other cards here */}
+      </div>
+    </div>
+  );
+}
